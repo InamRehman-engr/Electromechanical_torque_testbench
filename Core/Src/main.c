@@ -42,6 +42,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart2;
@@ -55,6 +57,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -158,6 +161,15 @@ int32_t HX711_ReadAverage(uint8_t samples)
     return (int32_t)(sum / samples);
 }
 
+
+extern ADC_HandleTypeDef hadc1;
+
+uint32_t adc_raw;
+float v_adc;
+float v_sensor;
+float current;
+
+
 /* USER CODE END 0 */
 
 /**
@@ -191,6 +203,7 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_TIM4_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
   char    msg[140];
@@ -228,7 +241,8 @@ int main(void)
            "Counts/Nm   = %.2f\r\n",
            hx_zero, COUNTS_PER_NM);
   HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-
+  Servo_SetAngle(90);
+  HAL_Delay(1000);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -236,19 +250,19 @@ int main(void)
   while (1)
   {
       // ── Step 1: Move servo through positions ─────────────────
-      Servo_SetAngle(0);
-      HAL_Delay(1000);
+//      Servo_SetAngle(0);
+//      HAL_Delay(1000);
+//
+//
+//      Servo_SetAngle(90);
+//      HAL_Delay(1000);
 
+//      Servo_SetAngle(180);
+//      HAL_Delay(1000);
 
-      Servo_SetAngle(90);
-      HAL_Delay(1000);
-
-      Servo_SetAngle(180);
-      HAL_Delay(1000);
-
-      // ── Step 2: Settle then read HX711 ───────────────────────
-      Servo_SetAngle(90);               // Return to neutral before reading
-      HAL_Delay(500);                   // Wait for mechanical settling
+//      // ── Step 2: Settle then read HX711 ───────────────────────
+//      Servo_SetAngle(90);               // Return to neutral before reading
+//      HAL_Delay(500);                   // Wait for mechanical settling
 
       hx_raw = HX711_ReadAverage(16);   // 16 samples = good noise reduction
       hx_net = hx_raw - hx_zero;
@@ -264,12 +278,24 @@ int main(void)
       if (torque >  FULL_SCALE_NM) torque =  FULL_SCALE_NM;
       if (torque < -FULL_SCALE_NM) torque = -FULL_SCALE_NM;
 
-      // ── Step 4: Transmit result ───────────────────────────────
-      snprintf(msg, sizeof(msg),
-               "RAW=%ld | Zero=%ld | Net=%ld | Torque=%+.4f Nm\r\n",
-               hx_raw, hx_zero, hx_net, torque);
-      HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+      HAL_ADC_Start(&hadc1);                              // ← THIS was missing
+      HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+         adc_raw = HAL_ADC_GetValue(&hadc1);
+         // Voltage seen at PA4
+         v_adc = (adc_raw * 3.3f) / 4095.0f;
+         // If using divider: 10k top, 20k bottom
+         // actual ACS758 output = PA4 voltage × 1.5
+         v_sensor = v_adc * 1.5f;
+         // ACS758 50A version, assuming 40mV/A sensitivity
+         current = (v_sensor - 2.5f) / 0.04f;
+         HAL_ADC_Stop(&hadc1);                               // stop after reading
+//         HAL_Delay(100);
 
+         // ── Step 4: Transmit result ───────────────────────────────
+         snprintf(msg, sizeof(msg),
+                  "RAW=%ld | Zero=%ld | Net=%ld | Torque=%+.4f Nm | Current=%.4f A\r\n",
+                  hx_raw, hx_zero, hx_net, torque, current);
+         HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -321,6 +347,58 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_144CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
