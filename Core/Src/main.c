@@ -2,24 +2,16 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : Torque + Current Measurement (HX711 + INA219 + Servo)
   ******************************************************************************
   */
-#include <stdio.h>
-#include <string.h>
+#include <stdio.h>    // snprintf
+#include <string.h>   // strlen
+#include <math.h>
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -42,12 +34,19 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
+I2C_HandleTypeDef hi2c1;
 
 TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart2;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -57,17 +56,15 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM4_Init(void);
-static void MX_ADC1_Init(void);
+static void MX_I2C1_Init(void);
+void StartDefaultTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-
-/* USER CODE BEGIN 0 */
-#include <math.h>
 
 // ── HX711 GPIO pins ───────────────────────────────────────────
 #define HX711_DOUT_PORT     GPIOA
@@ -76,27 +73,23 @@ static void MX_ADC1_Init(void);
 #define HX711_SCK_PIN       GPIO_PIN_1
 
 // ── Torque sensor specifications ──────────────────────────────
-#define SENSITIVITY_MV_PER_V    2.0f    // 2 mV/V from datasheet
-#define EXCITATION_V            5.0f    // 5V excitation supply
-#define FULL_SCALE_NM           10.0f   // 10 Nm max torque
-#define HX711_GAIN              128.0f  // Channel A, Gain 128
-#define HX711_VREF_MV           (EXCITATION_V * 1000.0f)  // 5000 mV
-#define HX711_COUNTS            8388608.0f  // 2^23
+#define SENSITIVITY_MV_PER_V    2.0f
+#define EXCITATION_V            5.0f
+#define FULL_SCALE_NM           10.0f
+#define HX711_GAIN              128.0f
+#define HX711_VREF_MV           (EXCITATION_V * 1000.0f)
+#define HX711_COUNTS            8388608.0f
 
-// ── Torque noise floor (ignore readings below this) ───────────
-#define TORQUE_DEADBAND_NM      0.05f   // 0.05 Nm deadband
+#define TORQUE_DEADBAND_NM      0.05f
 
 // ── Servo pulse calibration ───────────────────────────────────
-// Standard servo: 1000µs = 0°, 1500µs = 90°, 2000µs = 180°
-// If your servo doesn't reach full angle, adjust these:
-#define SERVO_PULSE_MIN_US      1000    // pulse for 0°   → increase if overshooting
-#define SERVO_PULSE_MAX_US      2000    // pulse for 180° → decrease if overshooting
-#define SERVO_PULSE_MID_US      1500    // pulse for 90°  (neutral)
+#define SERVO_PULSE_MIN_US      1000
+#define SERVO_PULSE_MAX_US      2000
+#define SERVO_PULSE_MID_US      1500
 
 // ── Servo functions ───────────────────────────────────────────
 void Servo_SetPulse(uint16_t pulse_us)
 {
-    // Clamp to safe range
     if (pulse_us < SERVO_PULSE_MIN_US) pulse_us = SERVO_PULSE_MIN_US;
     if (pulse_us > SERVO_PULSE_MAX_US) pulse_us = SERVO_PULSE_MAX_US;
     __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, pulse_us);
@@ -105,7 +98,6 @@ void Servo_SetPulse(uint16_t pulse_us)
 void Servo_SetAngle(uint16_t angle)
 {
     if (angle > 180) angle = 180;
-    // Map 0-180° → SERVO_PULSE_MIN_US to SERVO_PULSE_MAX_US
     uint16_t pulse = SERVO_PULSE_MIN_US
                    + ((uint32_t)angle
                    * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US)) / 180;
@@ -115,22 +107,19 @@ void Servo_SetAngle(uint16_t angle)
 // ── HX711 functions ───────────────────────────────────────────
 void HX711_WaitReady(void)
 {
-    // DOUT LOW means data is ready
-    uint32_t timeout = 1000; // 1 second max wait
+    uint32_t timeout = 1000;
     while (HAL_GPIO_ReadPin(HX711_DOUT_PORT, HX711_DOUT_PIN) == GPIO_PIN_SET)
     {
         HAL_Delay(1);
-        if (--timeout == 0) return; // prevent infinite hang
+        if (--timeout == 0) return;
     }
 }
 
 int32_t HX711_Read(void)
 {
     HX711_WaitReady();
-
     uint32_t raw = 0;
 
-    // Clock in 24 bits, MSB first
     for (int i = 0; i < 24; i++)
     {
         HAL_GPIO_WritePin(HX711_SCK_PORT, HX711_SCK_PIN, GPIO_PIN_SET);
@@ -140,7 +129,7 @@ int32_t HX711_Read(void)
         __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); __NOP();
     }
 
-    // 25th clock pulse → selects Channel A, Gain 128 for NEXT reading
+    // 25th pulse → selects Channel A, Gain 128 for NEXT reading
     HAL_GPIO_WritePin(HX711_SCK_PORT, HX711_SCK_PIN, GPIO_PIN_SET);
     __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); __NOP();
     HAL_GPIO_WritePin(HX711_SCK_PORT, HX711_SCK_PIN, GPIO_PIN_RESET);
@@ -161,14 +150,88 @@ int32_t HX711_ReadAverage(uint8_t samples)
     return (int32_t)(sum / samples);
 }
 
+// ── INA219 ────────────────────────────────────────────────────
+#define INA219_ADDR                 (0x40 << 1)
+#define INA219_REG_CONFIG           0x00
+#define INA219_REG_SHUNT_VOLTAGE    0x01
+#define INA219_REG_BUS_VOLTAGE      0x02
+#define INA219_REG_POWER            0x03
+#define INA219_REG_CURRENT          0x04
+#define INA219_REG_CALIBRATION      0x05
 
-extern ADC_HandleTypeDef hadc1;
+#define INA219_CONFIG_VALUE         0x399F   // 32V, 320mV shunt, 12-bit, continuous
 
-uint32_t adc_raw;
-float v_adc;
-float v_sensor;
-float current;
+#define INA219_RSHUNT_OHMS          0.1f
+#define INA219_MAX_EXPECTED_A       3.2f
+#define INA219_CURRENT_DEADBAND_A   0.02f
 
+static uint16_t ina219_cal_value      = 0;
+static float    ina219_current_lsb_A  = 0.0f;
+static float    ina219_power_lsb_W    = 0.0f;
+static float    ina219_zero_offset_A  = 0.0f;
+
+HAL_StatusTypeDef INA219_WriteReg(uint8_t reg, uint16_t value)
+{
+    uint8_t data[2];
+    data[0] = (value >> 8) & 0xFF;
+    data[1] = value & 0xFF;
+    return HAL_I2C_Mem_Write(&hi2c1, INA219_ADDR, reg, I2C_MEMADD_SIZE_8BIT,
+                             data, 2, HAL_MAX_DELAY);
+}
+
+HAL_StatusTypeDef INA219_ReadReg(uint8_t reg, uint16_t *value)
+{
+    uint8_t data[2];
+    HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&hi2c1, INA219_ADDR, reg, I2C_MEMADD_SIZE_8BIT,
+                                                data, 2, HAL_MAX_DELAY);
+    if (status != HAL_OK) return status;
+    *value = ((uint16_t)data[0] << 8) | data[1];
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef INA219_Init(void)
+{
+    ina219_current_lsb_A = INA219_MAX_EXPECTED_A / 32768.0f;
+    ina219_power_lsb_W   = 20.0f * ina219_current_lsb_A;
+    ina219_cal_value     = (uint16_t)(0.04096f / (ina219_current_lsb_A * INA219_RSHUNT_OHMS));
+
+    if (INA219_WriteReg(INA219_REG_CALIBRATION, ina219_cal_value) != HAL_OK) return HAL_ERROR;
+    if (INA219_WriteReg(INA219_REG_CONFIG, INA219_CONFIG_VALUE)   != HAL_OK) return HAL_ERROR;
+
+    HAL_Delay(10);
+    return HAL_OK;
+}
+
+float INA219_ReadCurrent_A(void)
+{
+    uint16_t reg;
+    if (INA219_WriteReg(INA219_REG_CALIBRATION, ina219_cal_value) != HAL_OK) return NAN;
+    if (INA219_ReadReg(INA219_REG_CURRENT, &reg) != HAL_OK) return NAN;
+    return (int16_t)reg * ina219_current_lsb_A;
+}
+
+float INA219_ReadBusVoltage_V(void)
+{
+    uint16_t reg;
+    if (INA219_ReadReg(INA219_REG_BUS_VOLTAGE, &reg) != HAL_OK) return NAN;
+    reg >>= 3;
+    return reg * 0.004f;
+}
+
+float INA219_TareCurrent(uint8_t samples)
+{
+    float sum = 0.0f;
+    uint8_t valid = 0;
+    for (uint8_t i = 0; i < samples; i++)
+    {
+        float val = INA219_ReadCurrent_A();
+        if (!isnan(val)) { sum += val; valid++; }
+        HAL_Delay(10);
+    }
+    if (valid == 0) return 0.0f;
+    ina219_zero_offset_A = sum / valid;
+    return ina219_zero_offset_A;
+}
 
 /* USER CODE END 0 */
 
@@ -203,99 +266,89 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_TIM4_Init();
-  MX_ADC1_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
+    char    msg[160];
+    int32_t hx_zero = 0;
+    int32_t hx_raw  = 0;
+    int32_t hx_net  = 0;
+    float   torque  = 0.0f;
 
-  char    msg[140];
-  int32_t hx_zero        = 0;
-  int32_t hx_raw         = 0;
-  int32_t hx_net         = 0;
-  float   torque         = 0.0f;
+    // Precompute scale factor
+    const float COUNTS_PER_NM = (HX711_COUNTS * HX711_GAIN
+                                  * SENSITIVITY_MV_PER_V * EXCITATION_V)
+                                 / (HX711_VREF_MV * 2.0f * FULL_SCALE_NM);
 
-  // ── Precompute scale factor (done ONCE, not in loop) ──────────
-  // HX711 with Gain 128, 5V excitation, 2mV/V sensor:
-  // Full scale sensor output = 2mV/V × 5V = 10mV
-  // HX711 input range at Gain 128 = ±20mV
-  // So 10mV sensor FSO maps to: 8388608 * (10/20) = 4194304 counts
-  // counts_per_nm = 4194304 / 10 Nm = 419430.4 counts/Nm
-  //
-  // Formula:
-  // counts_per_nm = (HX711_COUNTS * GAIN * SENSITIVITY_MV_PER_V * EXCITATION_V)
-  //               / (HX711_VREF_MV * 2.0 * FULL_SCALE_NM)
-  // HX711 Vref differential full scale = ±(Vcc/2) internally, effective ±20mV at gain 128
-  const float COUNTS_PER_NM = (HX711_COUNTS * HX711_GAIN
-                                * SENSITIVITY_MV_PER_V * EXCITATION_V)
-                               / (HX711_VREF_MV * 2.0f * FULL_SCALE_NM);
+    // Start servo PWM and go to neutral
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+    Servo_SetPulse(SERVO_PULSE_MID_US);
+    HAL_Delay(1000);
 
-  // Start servo and PWM
-  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
-  Servo_SetPulse(SERVO_PULSE_MID_US);   // Start at 90° / neutral
-  HAL_Delay(1000);                       // Wait for servo to reach position
+    // Tare HX711
+    hx_zero = HX711_ReadAverage(32);
 
-  // ── Zero / Tare (no load applied at startup) ──────────────────
-  hx_zero = HX711_ReadAverage(32);      // 32 samples for stable zero
+    snprintf(msg, sizeof(msg),
+             "=== SYSTEM READY ===\r\nZero offset = %ld\r\nCounts/Nm   = %.2f\r\n",
+             hx_zero, COUNTS_PER_NM);
+    HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 
-  snprintf(msg, sizeof(msg),
-           "=== SYSTEM READY ===\r\n"
-           "Zero offset = %ld\r\n"
-           "Counts/Nm   = %.2f\r\n",
-           hx_zero, COUNTS_PER_NM);
-  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-  Servo_SetAngle(90);
-  HAL_Delay(1000);
+    // Init INA219
+    HAL_StatusTypeDef ina_ok = INA219_Init();
+    if (ina_ok == HAL_OK)
+    {
+        float zero = INA219_TareCurrent(50);
+        snprintf(msg, sizeof(msg),
+                 "INA219 READY | CAL=%u | Current_LSB=%.8f A/bit | Zero=%.6f A\r\n",
+                 ina219_cal_value, ina219_current_lsb_A, zero);
+    }
+    else
+    {
+        snprintf(msg, sizeof(msg), "INA219 INIT FAILED\r\n");
+    }
+    HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-      // ── Step 1: Move servo through positions ─────────────────
-//      Servo_SetAngle(0);
-//      HAL_Delay(1000);
-//
-//
-//      Servo_SetAngle(90);
-//      HAL_Delay(1000);
-
-//      Servo_SetAngle(180);
-//      HAL_Delay(1000);
-
-//      // ── Step 2: Settle then read HX711 ───────────────────────
-//      Servo_SetAngle(90);               // Return to neutral before reading
-//      HAL_Delay(500);                   // Wait for mechanical settling
-
-      hx_raw = HX711_ReadAverage(16);   // 16 samples = good noise reduction
-      hx_net = hx_raw - hx_zero;
-
-      // ── Step 3: Compute torque ────────────────────────────────
-      torque = (float)hx_net / COUNTS_PER_NM;
-
-      // Apply deadband — zero out tiny noise readings
-      if (fabsf(torque) < TORQUE_DEADBAND_NM)
-          torque = 0.0f;
-
-      // Clamp to sensor physical range
-      if (torque >  FULL_SCALE_NM) torque =  FULL_SCALE_NM;
-      if (torque < -FULL_SCALE_NM) torque = -FULL_SCALE_NM;
-
-      HAL_ADC_Start(&hadc1);                              // ← THIS was missing
-      HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
-         adc_raw = HAL_ADC_GetValue(&hadc1);
-         // Voltage seen at PA4
-         v_adc = (adc_raw * 3.3f) / 4095.0f;
-         // If using divider: 10k top, 20k bottom
-         // actual ACS758 output = PA4 voltage × 1.5
-         v_sensor = v_adc * 1.5f;
-         // ACS758 50A version, assuming 40mV/A sensitivity
-         current = (v_sensor - 2.5f) / 0.04f;
-         HAL_ADC_Stop(&hadc1);                               // stop after reading
-//         HAL_Delay(100);
-
-         // ── Step 4: Transmit result ───────────────────────────────
-         snprintf(msg, sizeof(msg),
-                  "RAW=%ld | Zero=%ld | Net=%ld | Torque=%+.4f Nm | Current=%.4f A\r\n",
-                  hx_raw, hx_zero, hx_net, torque, current);
-         HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -350,54 +403,36 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief ADC1 Initialization Function
+  * @brief I2C1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_ADC1_Init(void)
+static void MX_I2C1_Init(void)
 {
 
-  /* USER CODE BEGIN ADC1_Init 0 */
+  /* USER CODE BEGIN I2C1_Init 0 */
 
-  /* USER CODE END ADC1_Init 0 */
+  /* USER CODE END I2C1_Init 0 */
 
-  ADC_ChannelConfTypeDef sConfig = {0};
+  /* USER CODE BEGIN I2C1_Init 1 */
 
-  /* USER CODE BEGIN ADC1_Init 1 */
-
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-  */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN I2C1_Init 2 */
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_4;
-  sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_144CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-
-  /* USER CODE END ADC1_Init 2 */
+  /* USER CODE END I2C1_Init 2 */
 
 }
 
@@ -516,6 +551,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PA4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -524,6 +565,24 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
