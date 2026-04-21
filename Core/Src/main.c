@@ -20,18 +20,33 @@ TIM_HandleTypeDef htim4;
 UART_HandleTypeDef huart2;
 
 /* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name       = "defaultTask",
-  .stack_size = 512 * 4,          // 2 KB  (was 128*4 = 512 B — too small for floats + snprintf)
-  .priority   = (osPriority_t) osPriorityNormal,
+osThreadId_t sensorTaskHandle;
+const osThreadAttr_t sensorTask_attributes = {
+    .name       = "sensorTask",
+    .stack_size = 512 * 4,                          // 2 KB — needs snprintf + floats
+    .priority   = (osPriority_t) osPriorityNormal,
 };
+/* Servo task — sweeps servo continuously */
 osThreadId_t servoTaskHandle;
 const osThreadAttr_t servoTask_attributes = {
-  .name       = "servoTask",
-  .stack_size = 512 * 2,          // 2 KB  (was 128*4 = 512 B — too small for floats + snprintf)
-  .priority   = (osPriority_t) osPriorityNormal,
+    .name       = "servoTask",                      // MUST differ from sensorTask name
+    .stack_size = 128 * 4,                          // 512 B — only GPIO writes, very small
+    .priority   = (osPriority_t) osPriorityBelowNormal,
 };
+
+
+/* ===========================================================================
+   RTOS mutex handles
+   i2cMutex  — guards INA219 I2C transactions (write CAL + read reg are atomic)
+   uartMutex — guards HAL_UART_Transmit so tasks never interleave bytes
+   =========================================================================== */
+osMutexId_t         i2cMutexHandle;
+const osMutexAttr_t i2cMutex_attributes  = { .name = "i2cMutex"  };
+
+osMutexId_t         uartMutexHandle;
+const osMutexAttr_t uartMutex_attributes = { .name = "uartMutex" };
+
+
 /* USER CODE BEGIN PV */
 
 // ── HX711 GPIO pins ───────────────────────────────────────────────────────────
@@ -84,7 +99,7 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_I2C1_Init(void);
-void StartDefaultTask(void *argument);
+void SensorTask(void *argument);
 void ServoTask(void *argument);
 /* USER CODE BEGIN 0 */
 
@@ -247,7 +262,12 @@ int main(void)
 
     // Start servo PWM and go to neutral
     HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
-
+    Servo_SetPulse(SERVO_PULSE_MIN_US);
+    HAL_Delay(1000);
+    Servo_SetPulse(SERVO_PULSE_MID_US);
+    HAL_Delay(1000);
+    Servo_SetPulse(SERVO_PULSE_MAX_US);
+    HAL_Delay(1000);
     // Tare HX711 (store in global)
     hx_zero = HX711_ReadAverage(32);
 
@@ -272,32 +292,46 @@ int main(void)
 
     /* USER CODE END 2 */
 
-    // ── Start RTOS ────────────────────────────────────────────────────────────
+    /* ── Start RTOS ──────────────────────────────────────────────────────── */
     osKernelInitialize();
-    defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-    servoTaskHandle = osThreadNew(ServoTask, NULL, &servoTask_attributes);
+
+    /* Create mutexes BEFORE creating tasks */
+     i2cMutexHandle  = osMutexNew(&i2cMutex_attributes);
+     uartMutexHandle = osMutexNew(&uartMutex_attributes);
+
+     /* Create tasks — each uses its own attributes struct with a unique name */
+     sensorTaskHandle = osThreadNew(SensorTask, NULL, &sensorTask_attributes);
+     servoTaskHandle  = osThreadNew(ServoTask,  NULL, &servoTask_attributes);
+
+
     osKernelStart();
 
     // Never reached
-    while (1) {
-
-    }
+    while (1) {}
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  RTOS default task  –  measurement loop runs here
 // ═════════════════════════════════════════════════════════════════════════════
-void ServoTask(void *argument){
-	for(;;){
-		Servo_SetPulse(SERVO_PULSE_MIN_US);
-		osDelay(500);
-		Servo_SetPulse(SERVO_PULSE_MID_US);
-		osDelay(500);
-		Servo_SetPulse(SERVO_PULSE_MAX_US);
-		osDelay(500);
-	}
+void ServoTask(void *argument)
+{
+    for (;;)
+    {
+        Servo_SetPulse(SERVO_PULSE_MIN_US);   // full CCW  (1000 µs)
+        osDelay(500);
+
+        Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
+        osDelay(500);
+
+        Servo_SetPulse(SERVO_PULSE_MAX_US);   // full CW   (2000 µs)
+        osDelay(500);
+
+        Servo_SetPulse(SERVO_PULSE_MID_US);   // back to center before repeating
+        osDelay(500);
+    }
 }
-void StartDefaultTask(void *argument)
+
+void SensorTask(void *argument)
 {
     /* USER CODE BEGIN 5 */
     char  msg[160];
@@ -307,7 +341,6 @@ void StartDefaultTask(void *argument)
 
     for (;;)
     {
-
         // ── HX711 torque reading ─────────────────────────────────────────────
         int32_t hx_raw = HX711_Read();
         int32_t hx_net = hx_raw - hx_zero;
