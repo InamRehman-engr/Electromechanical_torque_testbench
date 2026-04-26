@@ -59,7 +59,7 @@ const osMutexAttr_t uartMutex_attributes = { .name = "uartMutex" };
 #define SENSITIVITY_MV_PER_V    2.0f
 #define EXCITATION_V            5.0f
 #define FULL_SCALE_NM           10.0f
-#define HX711_GAIN              128.0f
+#define HX711_GAIN              512.0f
 #define HX711_VREF_MV           (EXCITATION_V * 1000.0f)
 #define HX711_COUNTS            8388608.0f
 #define TORQUE_DEADBAND_NM      0.05f
@@ -78,7 +78,7 @@ const osMutexAttr_t uartMutex_attributes = { .name = "uartMutex" };
 #define INA219_REG_CURRENT          0x04
 #define INA219_REG_CALIBRATION      0x05
 #define INA219_CONFIG_VALUE         0x399F   // 32 V, 320 mV shunt, 12-bit, continuous
-#define INA219_RSHUNT_OHMS          0.1f
+#define INA219_RSHUNT_OHMS          0.0319f
 #define INA219_MAX_EXPECTED_A       3.2f
 #define INA219_CURRENT_DEADBAND_A   0.02f
 
@@ -320,14 +320,14 @@ void ServoTask(void *argument)
         Servo_SetPulse(SERVO_PULSE_MIN_US);   // full CCW  (1000 µs)
         osDelay(500);
 
-        Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
-        osDelay(500);
-
-        Servo_SetPulse(SERVO_PULSE_MAX_US);   // full CW   (2000 µs)
-        osDelay(500);
-
-        Servo_SetPulse(SERVO_PULSE_MID_US);   // back to center before repeating
-        osDelay(500);
+//        Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
+//        osDelay(500);
+//
+//        Servo_SetPulse(SERVO_PULSE_MAX_US);   // full CW   (2000 µs)
+//        osDelay(500);
+//
+//        Servo_SetPulse(SERVO_PULSE_MID_US);   // back to center before repeating
+//        osDelay(500);
     }
 }
 
@@ -368,8 +368,8 @@ void SensorTask(void *argument)
         if (!isnan(current_A) && !isnan(bus_V))
         {
             snprintf(msg, sizeof(msg),
-                     "T=%7.4f Nm | I=%7.4f A | V=%6.3f V\r\n",
-                     torque, current_A, bus_V);
+                     "T=%7.4f Nm | I=%7.4f A | V=%6.3f V | hx_net=%ld | count_per_NM=%6.3f\r\n",
+                     torque, current_A, bus_V, hx_net, COUNTS_PER_NM);
         }
         else
         {
