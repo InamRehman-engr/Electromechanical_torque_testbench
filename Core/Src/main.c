@@ -37,12 +37,10 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart2;
-
-/* Definitions for defaultTask */
 
 /* USER CODE BEGIN PV */
 osThreadId_t sensorTaskHandle;
@@ -115,12 +113,12 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_TIM2_Init(void);
-void StartDefaultTask(void *argument);
+static void MX_TIM3_Init(void);
 
 /* USER CODE BEGIN PFP */
 void SensorTask(void *argument);
 void ServoTask(void *argument);
+void Set_PWM(uint8_t pwm_value);
 
 /* USER CODE END PFP */
 
@@ -144,6 +142,11 @@ void Servo_SetAngle(uint16_t angle)
                    + ((uint32_t)angle
                    * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US)) / 180;
     Servo_SetPulse(pulse);
+}
+
+void Set_PWM(uint8_t pwm_value)
+{
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_value);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -296,7 +299,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM4_Init();
   MX_I2C1_Init();
-  MX_TIM2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
     char msg[160];
 
@@ -335,8 +338,6 @@ int main(void)
     }
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 
-    sensorTaskHandle = osThreadNew(SensorTask, NULL, &sensorTask_attributes);
-    servoTaskHandle  = osThreadNew(ServoTask,  NULL, &servoTask_attributes);
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -344,6 +345,8 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
+  i2cMutexHandle  = osMutexNew(&i2cMutex_attributes);   // 2. Create mutexes
+  uartMutexHandle = osMutexNew(&uartMutex_attributes);
   /* Create mutexes BEFORE creating tasks */
   /* USER CODE END RTOS_MUTEX */
 
@@ -361,8 +364,11 @@ int main(void)
 
   /* Create the thread(s) */
   /* creation of defaultTask */
+
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
+  sensorTaskHandle = osThreadNew(SensorTask, NULL, &sensorTask_attributes);
+  servoTaskHandle  = osThreadNew(ServoTask,  NULL, &servoTask_attributes);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -381,6 +387,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+
   }
   /* USER CODE END 3 */
 }
@@ -466,36 +474,46 @@ static void MX_I2C1_Init(void)
 }
 
 /**
-  * @brief TIM2 Initialization Function
+  * @brief TIM3 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM2_Init(void)
+static void MX_TIM3_Init(void)
 {
 
-  /* USER CODE BEGIN TIM2_Init 0 */
+  /* USER CODE BEGIN TIM3_Init 0 */
 
-  /* USER CODE END TIM2_Init 0 */
+  /* USER CODE END TIM3_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
-  /* USER CODE BEGIN TIM2_Init 1 */
+  /* USER CODE BEGIN TIM3_Init 1 */
 
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 83;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 255;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 83;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 255;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
   }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
@@ -503,14 +521,14 @@ static void MX_TIM2_Init(void)
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM2_Init 2 */
+  /* USER CODE BEGIN TIM3_Init 2 */
 
-  /* USER CODE END TIM2_Init 2 */
-  HAL_TIM_MspPostInit(&htim2);
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
 
 }
 
@@ -629,12 +647,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -651,9 +663,12 @@ static void MX_GPIO_Init(void)
   * @retval None
   */
 /* USER CODE END Header_StartDefaultTask */
+
   /* USER CODE BEGIN 5 */
 void ServoTask(void *argument)
   {
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);  // ← once here
+
       for (;;){
           Servo_SetPulse(SERVO_PULSE_MIN_US);   // full CCW  (1000 µs)
             osDelay(500);
@@ -665,6 +680,22 @@ void ServoTask(void *argument)
             //
             //        Servo_SetPulse(SERVO_PULSE_MID_US);   // back to center before repeating
             //        osDelay(500);
+
+		        for (uint8_t pwm = 0; pwm <= 250; pwm += 5)
+		        {
+		            Set_PWM(pwm);
+		            osDelay(100);
+		        }
+		        Set_PWM(255);   // ensure we hit 255 exactly
+		        osDelay(1000);
+
+		        for (int16_t pwm = 255; pwm >= 0; pwm -= 5)
+		        {
+		            Set_PWM((uint8_t)pwm);
+		            osDelay(100);
+		        }
+		        Set_PWM(0);     // ensure we hit 0 exactly
+		        osDelay(1000);
 	  }
 }
 
