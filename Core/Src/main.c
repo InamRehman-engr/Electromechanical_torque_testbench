@@ -56,6 +56,18 @@ const osThreadAttr_t servoTask_attributes = {
     .stack_size = 128 * 4,                          // 512 B — only GPIO writes, very small
     .priority   = (osPriority_t) osPriorityBelowNormal,
 };
+osThreadId_t relayTaskHandle;
+const osThreadAttr_t relayTask_attributes = {
+    .name       = "relayTask",                      // MUST differ from sensorTask name
+    .stack_size = 128 * 4,                          // 512 B — only GPIO writes, very small
+    .priority   = (osPriority_t) osPriorityBelowNormal,
+};
+osThreadId_t pwmTaskHandle;
+const osThreadAttr_t pwmTask_attributes = {
+    .name       = "pwmTask",                      // MUST differ from sensorTask name
+    .stack_size = 128 * 4,                          // 512 B — only GPIO writes, very small
+    .priority   = (osPriority_t) osPriorityBelowNormal,
+};
 
 osMutexId_t         i2cMutexHandle;
 const osMutexAttr_t i2cMutex_attributes  = { .name = "i2cMutex"  };
@@ -118,6 +130,8 @@ static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 void SensorTask(void *argument);
 void ServoTask(void *argument);
+void RelayTask(void *argument);
+void PWMTask(void *argument);
 void Set_PWM(uint8_t pwm_value);
 
 /* USER CODE END PFP */
@@ -264,6 +278,12 @@ float INA219_TareCurrent(uint8_t samples)
     return ina219_zero_offset_A;
 }
 
+void Setpin(GPIO_TypeDef *GPIOx, uint16_t pin){
+	HAL_GPIO_WritePin(GPIOx, pin, GPIO_PIN_SET);    // PA1 HIGH
+}
+void Resetpin(GPIO_TypeDef *GPIOx, uint16_t pin){
+	HAL_GPIO_WritePin(GPIOx, pin, GPIO_PIN_RESET);    // PA1 HIGH
+}
 /* USER CODE END 0 */
 
 /**
@@ -369,6 +389,10 @@ int main(void)
   /* add threads, ... */
   sensorTaskHandle = osThreadNew(SensorTask, NULL, &sensorTask_attributes);
   servoTaskHandle  = osThreadNew(ServoTask,  NULL, &servoTask_attributes);
+  relayTaskHandle  = osThreadNew(RelayTask,  NULL, &relayTask_attributes);
+  pwmTaskHandle  = osThreadNew(PWMTask,  NULL, &pwmTask_attributes);
+
+
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -632,7 +656,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1|GPIO_PIN_8|GPIO_PIN_10, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : PA0 */
   GPIO_InitStruct.Pin = GPIO_PIN_0;
@@ -640,12 +667,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  /*Configure GPIO pins : PA1 PA8 PA10 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_8|GPIO_PIN_10;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB10 PB3 PB4 PB5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -663,39 +697,69 @@ static void MX_GPIO_Init(void)
   * @retval None
   */
 /* USER CODE END Header_StartDefaultTask */
-
   /* USER CODE BEGIN 5 */
+
+void PWMTask(void * argument){
+	for(;;){
+    for (uint8_t pwm = 0; pwm <= 250; pwm += 5)
+		{
+			Set_PWM(pwm);
+			osDelay(100);
+		}
+		Set_PWM(255);   // ensure we hit 255 exactly
+		osDelay(1000);
+
+		for (int16_t pwm = 255; pwm >= 0; pwm -= 5)
+		{
+			Set_PWM((uint8_t)pwm);
+			osDelay(100);
+		}
+		Set_PWM(0);     // ensure we hit 0 exactly
+		osDelay(1000);
+	}
+}
+void RelayTask(void *argument){
+	uint16_t pinB[4]={GPIO_PIN_3,GPIO_PIN_5,GPIO_PIN_4,GPIO_PIN_10};
+	    uint16_t pinA[2]={GPIO_PIN_10,GPIO_PIN_8};
+
+	for (;;){
+	    Setpin(GPIOA,pinA[0]);
+		osDelay(100);
+		for(int i=0;i<4;i++){
+			Setpin(GPIOB,pinB[i]);
+			osDelay(100);
+		}
+		Setpin(GPIOA,pinA[1]);
+		osDelay(100);
+
+		Resetpin(GPIOA,pinA[1]);
+		osDelay(100);
+		for(int i=3;i>=0;i--){
+			Resetpin(GPIOB,pinB[i]);
+			osDelay(100);
+		}
+		Resetpin(GPIOA,pinA[0]);
+		osDelay(100);
+
+	}
+
+}
+
 void ServoTask(void *argument)
   {
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);  // ← once here
 
       for (;;){
-          Servo_SetPulse(SERVO_PULSE_MIN_US);   // full CCW  (1000 µs)
-            osDelay(500);
-            //        Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
-            //        osDelay(500);
-            //
-            //        Servo_SetPulse(SERVO_PULSE_MAX_US);   // full CW   (2000 µs)
-            //        osDelay(500);
-            //
-            //        Servo_SetPulse(SERVO_PULSE_MID_US);   // back to center before repeating
-            //        osDelay(500);
+            Servo_SetPulse(SERVO_PULSE_MIN_US);   // full CCW  (1000 µs)
+			osDelay(500);
+			Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
+			osDelay(500);
 
-		        for (uint8_t pwm = 0; pwm <= 250; pwm += 5)
-		        {
-		            Set_PWM(pwm);
-		            osDelay(100);
-		        }
-		        Set_PWM(255);   // ensure we hit 255 exactly
-		        osDelay(1000);
+			Servo_SetPulse(SERVO_PULSE_MAX_US);   // full CW   (2000 µs)
+			osDelay(500);
 
-		        for (int16_t pwm = 255; pwm >= 0; pwm -= 5)
-		        {
-		            Set_PWM((uint8_t)pwm);
-		            osDelay(100);
-		        }
-		        Set_PWM(0);     // ensure we hit 0 exactly
-		        osDelay(1000);
+			Servo_SetPulse(SERVO_PULSE_MID_US);   // back to center before repeating
+			osDelay(500);
 	  }
 }
 
