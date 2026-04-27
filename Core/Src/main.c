@@ -117,6 +117,9 @@ static float    ina219_current_lsb_A = 0.0f;
 static float    ina219_power_lsb_W   = 0.0f;
 static float    ina219_zero_offset_A = 0.0f;
 
+uint16_t pinB[4]={GPIO_PIN_3,GPIO_PIN_5,GPIO_PIN_4,GPIO_PIN_10};
+uint16_t pinA[2]={GPIO_PIN_10,GPIO_PIN_8};
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -279,10 +282,10 @@ float INA219_TareCurrent(uint8_t samples)
 }
 
 void Setpin(GPIO_TypeDef *GPIOx, uint16_t pin){
-	HAL_GPIO_WritePin(GPIOx, pin, GPIO_PIN_SET);    // PA1 HIGH
+	HAL_GPIO_WritePin(GPIOx, pin, GPIO_PIN_RESET);    // PA1 HIGH
 }
 void Resetpin(GPIO_TypeDef *GPIOx, uint16_t pin){
-	HAL_GPIO_WritePin(GPIOx, pin, GPIO_PIN_RESET);    // PA1 HIGH
+	HAL_GPIO_WritePin(GPIOx, pin, GPIO_PIN_SET);    // PA1 HIGH
 }
 /* USER CODE END 0 */
 
@@ -316,12 +319,41 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  Resetpin(GPIOA,pinA[1]);
+  	HAL_Delay(100);
+  	for(int i=3;i>=0;i--){
+  		Resetpin(GPIOB,pinB[i]);
+  		HAL_Delay(100);
+  	}
+  	Resetpin(GPIOA,pinA[0]);
+  	HAL_Delay(100);
+      char msg[160];
   MX_USART2_UART_Init();
   MX_TIM4_Init();
   MX_I2C1_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-    char msg[160];
+
+
+    Setpin(GPIOB,pinB[0]); //RST
+    HAL_Delay(1000);
+    Resetpin(GPIOB,pinB[0]); // RST
+    HAL_Delay(1000);
+    Setpin(GPIOB,pinB[3]); // Torque
+    HAL_Delay(1000);
+    Setpin(GPIOB,pinB[1]); // RUN
+    HAL_Delay(1000);
+    Setpin(GPIOB,pinB[2]); //FWD
+    HAL_Delay(2000);
+    Resetpin(GPIOB,pinB[2]); //FWD
+    HAL_Delay(1000);
+    Setpin(GPIOA,pinA[0]); //REV
+    HAL_Delay(2000);
+    Resetpin(GPIOA,pinA[0]); //REV
+    HAL_Delay(2000);
+
+
+
 
     // Pre-compute scale factor (stored in global)
     COUNTS_PER_NM = (HX711_COUNTS * HX711_GAIN
@@ -389,7 +421,7 @@ int main(void)
   /* add threads, ... */
   sensorTaskHandle = osThreadNew(SensorTask, NULL, &sensorTask_attributes);
   servoTaskHandle  = osThreadNew(ServoTask,  NULL, &servoTask_attributes);
-  relayTaskHandle  = osThreadNew(RelayTask,  NULL, &relayTask_attributes);
+//  relayTaskHandle  = osThreadNew(RelayTask,  NULL, &relayTask_attributes);
   pwmTaskHandle  = osThreadNew(PWMTask,  NULL, &pwmTask_attributes);
 
 
@@ -719,8 +751,6 @@ void PWMTask(void * argument){
 	}
 }
 void RelayTask(void *argument){
-	uint16_t pinB[4]={GPIO_PIN_3,GPIO_PIN_5,GPIO_PIN_4,GPIO_PIN_10};
-	    uint16_t pinA[2]={GPIO_PIN_10,GPIO_PIN_8};
 
 	for (;;){
 	    Setpin(GPIOA,pinA[0]);
@@ -732,13 +762,13 @@ void RelayTask(void *argument){
 		Setpin(GPIOA,pinA[1]);
 		osDelay(100);
 
-		Resetpin(GPIOA,pinA[1]);
+		Resetpin(GPIOA,pinA[0]);
 		osDelay(100);
-		for(int i=3;i>=0;i--){
+		for(int i=0;i<4;i++){
 			Resetpin(GPIOB,pinB[i]);
 			osDelay(100);
 		}
-		Resetpin(GPIOA,pinA[0]);
+		Resetpin(GPIOA,pinA[1]);
 		osDelay(100);
 
 	}
