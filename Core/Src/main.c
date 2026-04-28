@@ -119,6 +119,29 @@ static float    ina219_zero_offset_A = 0.0f;
 
 uint16_t pinB[4]={GPIO_PIN_3,GPIO_PIN_5,GPIO_PIN_4,GPIO_PIN_10};
 uint16_t pinA[2]={GPIO_PIN_10,GPIO_PIN_8};
+typedef struct
+{
+    float torque;
+    float current_A;
+    float bus_V;
+    int32_t hx_net;
+    float counts_per_nm;
+    uint8_t ina_ok;
+} UartPacket_t;
+
+osThreadId_t uartTaskHandle;
+
+const osThreadAttr_t uartTask_attributes = {
+    .name       = "uartTask",
+    .stack_size = 512 * 4,
+    .priority   = (osPriority_t) osPriorityBelowNormal,
+};
+
+osMessageQueueId_t uartQueueHandle;
+
+const osMessageQueueAttr_t uartQueue_attributes = {
+    .name = "uartQueue"
+};
 
 /* USER CODE END PV */
 
@@ -135,6 +158,7 @@ void SensorTask(void *argument);
 void ServoTask(void *argument);
 void RelayTask(void *argument);
 void PWMTask(void *argument);
+void UartTask(void *argument);
 void Set_PWM(uint8_t pwm_value);
 
 /* USER CODE END PFP */
@@ -149,7 +173,7 @@ void Servo_SetPulse(uint16_t pulse_us)
 {
     if (pulse_us < SERVO_PULSE_MIN_US) pulse_us = SERVO_PULSE_MIN_US;
     if (pulse_us > SERVO_PULSE_MAX_US) pulse_us = SERVO_PULSE_MAX_US;
-    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, pulse_us);
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, pulse_us);
 }
 
 void Servo_SetAngle(uint16_t angle)
@@ -319,41 +343,13 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  Resetpin(GPIOA,pinA[1]);
-  	HAL_Delay(100);
-  	for(int i=3;i>=0;i--){
-  		Resetpin(GPIOB,pinB[i]);
-  		HAL_Delay(100);
-  	}
-  	Resetpin(GPIOA,pinA[0]);
-  	HAL_Delay(100);
-      char msg[160];
   MX_USART2_UART_Init();
   MX_TIM4_Init();
   MX_I2C1_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
-
-    Setpin(GPIOB,pinB[0]); //RST
-    HAL_Delay(1000);
-    Resetpin(GPIOB,pinB[0]); // RST
-    HAL_Delay(1000);
-    Setpin(GPIOB,pinB[3]); // Torque
-    HAL_Delay(1000);
-    Setpin(GPIOB,pinB[1]); // RUN
-    HAL_Delay(1000);
-    Setpin(GPIOB,pinB[2]); //FWD
-    HAL_Delay(2000);
-    Resetpin(GPIOB,pinB[2]); //FWD
-    HAL_Delay(1000);
-    Setpin(GPIOA,pinA[0]); //REV
-    HAL_Delay(2000);
-    Resetpin(GPIOA,pinA[0]); //REV
-    HAL_Delay(2000);
-
-
-
+  char msg[160];
 
     // Pre-compute scale factor (stored in global)
     COUNTS_PER_NM = (HX711_COUNTS * HX711_GAIN
@@ -361,7 +357,9 @@ int main(void)
                     / (HX711_VREF_MV * 2.0f * FULL_SCALE_NM);
 
     // Start servo PWM and go to neutral
-    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+
     Servo_SetPulse(SERVO_PULSE_MIN_US);
     HAL_Delay(1000);
     Servo_SetPulse(SERVO_PULSE_MID_US);
@@ -389,6 +387,9 @@ int main(void)
         snprintf(msg, sizeof(msg), "INA219 INIT FAILED\r\n");
     }
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+   	HAL_Delay(5000);
+
+
 
   /* USER CODE END 2 */
 
@@ -412,13 +413,14 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
+  uartQueueHandle = osMessageQueueNew(16, sizeof(UartPacket_t), &uartQueue_attributes);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
   /* creation of defaultTask */
-
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
+  uartTaskHandle = osThreadNew(UartTask, NULL, &uartTask_attributes);
   sensorTaskHandle = osThreadNew(SensorTask, NULL, &sensorTask_attributes);
   servoTaskHandle  = osThreadNew(ServoTask,  NULL, &servoTask_attributes);
 //  relayTaskHandle  = osThreadNew(RelayTask,  NULL, &relayTask_attributes);
@@ -600,6 +602,7 @@ static void MX_TIM4_Init(void)
 
   /* USER CODE END TIM4_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
@@ -612,6 +615,15 @@ static void MX_TIM4_Init(void)
   htim4.Init.Period = 19999;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
   {
     Error_Handler();
@@ -626,7 +638,7 @@ static void MX_TIM4_Init(void)
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -713,6 +725,22 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /* Configure TIM3_CH1 on PA6 for PWM */
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF2_TIM3;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* Configure TIM4_CH2 on PB7 for PWM */
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -729,25 +757,26 @@ static void MX_GPIO_Init(void)
   * @retval None
   */
 /* USER CODE END Header_StartDefaultTask */
+
   /* USER CODE BEGIN 5 */
 
 void PWMTask(void * argument){
 	for(;;){
-    for (uint8_t pwm = 0; pwm <= 250; pwm += 5)
-		{
-			Set_PWM(pwm);
-			osDelay(100);
-		}
-		Set_PWM(255);   // ensure we hit 255 exactly
+//    for (uint8_t pwm = 0; pwm <= 250; pwm += 5)
+//		{
+//			Set_PWM(pwm);
+//			osDelay(100);
+//		}
+		Set_PWM(125);   // ensure we hit 255 exactly
 		osDelay(1000);
 
-		for (int16_t pwm = 255; pwm >= 0; pwm -= 5)
-		{
-			Set_PWM((uint8_t)pwm);
-			osDelay(100);
-		}
-		Set_PWM(0);     // ensure we hit 0 exactly
-		osDelay(1000);
+//		for (int16_t pwm = 255; pwm >= 0; pwm -= 5)
+//		{
+//			Set_PWM((uint8_t)pwm);
+//			osDelay(100);
+//		}
+//		Set_PWM(0);     // ensure we hit 0 exactly
+//		osDelay(1000);
 	}
 }
 void RelayTask(void *argument){
@@ -777,25 +806,44 @@ void RelayTask(void *argument){
 
 void ServoTask(void *argument)
   {
-    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);  // ← once here
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
+    Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
+    osDelay(2000);
+    Setpin(GPIOB,pinB[0]); //RST
+    osDelay(1000);
+    Resetpin(GPIOB,pinB[0]); // RST
+    osDelay(1000);
+    Setpin(GPIOB,pinB[3]); // Torque
+    osDelay(1000);
+    Setpin(GPIOB,pinB[1]); // RUN
+    osDelay(1000);
+
 
       for (;;){
-            Servo_SetPulse(SERVO_PULSE_MIN_US);   // full CCW  (1000 µs)
-			osDelay(500);
-			Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
-			osDelay(500);
-
-			Servo_SetPulse(SERVO_PULSE_MAX_US);   // full CW   (2000 µs)
-			osDelay(500);
-
-			Servo_SetPulse(SERVO_PULSE_MID_US);   // back to center before repeating
-			osDelay(500);
+//            Servo_SetPulse(SERVO_PULSE_MIN_US);   // full CCW  (1000 µs)
+//			osDelay(500);
+//			Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
+//			osDelay(500);
+//
+//			Servo_SetPulse(SERVO_PULSE_MAX_US);   // full CW   (2000 µs)
+//			osDelay(500);
+//
+//			Servo_SetPulse(SERVO_PULSE_MID_US);   // back to center before repeating
+//			osDelay(500);
+    	     Setpin(GPIOB,pinB[2]); //FWD
+    	     osDelay(1000);
+    	     Resetpin(GPIOB,pinB[2]); //FWD
+    	     osDelay(1000);
+    	     Setpin(GPIOA,pinA[0]); //REV
+    	     osDelay(2000);
+    	     Resetpin(GPIOA,pinA[0]); //REV
+    	     osDelay(2000);
 	  }
 }
 
 void SensorTask(void *argument)
 {
-   char  msg[160];
+//   char  msg[160];
    float torque    = 0.0f;
    float current_A = 0.0f;
    float bus_V     = 0.0f;
@@ -826,23 +874,63 @@ void SensorTask(void *argument)
        bus_V = INA219_ReadBusVoltage_V();
 
        // ── Transmit results over UART ────────────────────────────────────────
-       if (!isnan(current_A) && !isnan(bus_V))
-       {
-           snprintf(msg, sizeof(msg),
-                    "T=%7.4f Nm | I=%7.4f A | V=%6.3f V | hx_net=%ld | count_per_NM=%6.3f\r\n",
-                    torque, current_A, bus_V, hx_net, COUNTS_PER_NM);
-       }
-       else
-       {
-           snprintf(msg, sizeof(msg),
-                    "T=%7.4f Nm | INA219 READ ERROR\r\n",
-                    torque);
-       }
+//       if (!isnan(current_A) && !isnan(bus_V))
+//       {
+//           snprintf(msg, sizeof(msg),
+//                    "T=%7.4f Nm | I=%7.4f A | V=%6.3f V | hx_net=%ld | count_per_NM=%6.3f\r\n",
+//                    torque, current_A, bus_V, hx_net, COUNTS_PER_NM);
+//       }
+//       else
+//       {
+//           snprintf(msg, sizeof(msg),
+//                    "T=%7.4f Nm | INA219 READ ERROR\r\n",
+//                    torque);
+//       }
 
-       HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+//       HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+       UartPacket_t pkt;
 
-       osDelay(100);   // 10 Hz sample rate — adjust as needed
+       pkt.torque = torque;
+       pkt.current_A = current_A;
+       pkt.bus_V = bus_V;
+       pkt.hx_net = hx_net;
+       pkt.counts_per_nm = COUNTS_PER_NM;
+       pkt.ina_ok = (!isnan(current_A) && !isnan(bus_V)) ? 1 : 0;
+
+       osMessageQueuePut(uartQueueHandle, &pkt, 0, 0);
+
+       osDelay(50);   // 10 Hz sample rate — adjust as needed
    }
+}
+void UartTask(void *argument)
+{
+    char msg[160];
+    UartPacket_t pkt;
+
+    for (;;)
+    {
+        if (osMessageQueueGet(uartQueueHandle, &pkt, NULL, osWaitForever) == osOK)
+        {
+            if (pkt.ina_ok)
+            {
+                snprintf(msg, sizeof(msg),
+                         "T=%7.4f Nm | I=%7.4f A | V=%6.3f V | hx_net=%ld | count_per_NM=%6.3f\r\n",
+                         pkt.torque,
+                         pkt.current_A,
+                         pkt.bus_V,
+                         pkt.hx_net,
+                         pkt.counts_per_nm);
+            }
+            else
+            {
+                snprintf(msg, sizeof(msg),
+                         "T=%7.4f Nm | INA219 READ ERROR\r\n",
+                         pkt.torque);
+            }
+
+            HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
+        }
+    }
 }
   /* USER CODE END 5 */
 
