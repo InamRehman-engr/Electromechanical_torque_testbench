@@ -66,7 +66,7 @@ osThreadId_t pwmTaskHandle;
 const osThreadAttr_t pwmTask_attributes = {
     .name       = "pwmTask",                      // MUST differ from sensorTask name
     .stack_size = 128 * 4,                          // 512 B — only GPIO writes, very small
-    .priority   = (osPriority_t) osPriorityBelowNormal,
+    .priority   = (osPriority_t) osPriorityLow,
 };
 
 osMutexId_t         i2cMutexHandle;
@@ -134,7 +134,7 @@ osThreadId_t uartTaskHandle;
 const osThreadAttr_t uartTask_attributes = {
     .name       = "uartTask",
     .stack_size = 512 * 4,
-    .priority   = (osPriority_t) osPriorityBelowNormal,
+    .priority   = (osPriority_t) osPriorityAboveNormal,
 };
 
 osMessageQueueId_t uartQueueHandle;
@@ -343,13 +343,22 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  Resetpin(GPIOA,pinA[1]);
+  	HAL_Delay(100);
+  	for(int i=3;i>=0;i--){
+  		Resetpin(GPIOB,pinB[i]);
+  		HAL_Delay(100);
+  	}
+  	Resetpin(GPIOA,pinA[0]);
+  	HAL_Delay(100);
+      char msg[160];
   MX_USART2_UART_Init();
   MX_TIM4_Init();
   MX_I2C1_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-
-  char msg[160];
+  Servo_SetAngle(SERVO_PULSE_MAX_US);
+  HAL_Delay(1000);
 
     // Pre-compute scale factor (stored in global)
     COUNTS_PER_NM = (HX711_COUNTS * HX711_GAIN
@@ -360,12 +369,12 @@ int main(void)
     HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
 
-    Servo_SetPulse(SERVO_PULSE_MIN_US);
-    HAL_Delay(1000);
+//    Servo_SetPulse(SERVO_PULSE_MIN_US);
+//    HAL_Delay(1000);
     Servo_SetPulse(SERVO_PULSE_MID_US);
     HAL_Delay(1000);
-    Servo_SetPulse(SERVO_PULSE_MAX_US);
-    HAL_Delay(1000);
+//    Servo_SetPulse(SERVO_PULSE_MAX_US);
+//    HAL_Delay(1000);
     // Tare HX711 (store in global)
     hx_zero = HX711_ReadAverage(32);
 
@@ -413,7 +422,7 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
-  uartQueueHandle = osMessageQueueNew(16, sizeof(UartPacket_t), &uartQueue_attributes);
+  uartQueueHandle = osMessageQueueNew(32, sizeof(UartPacket_t), &uartQueue_attributes);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -767,7 +776,7 @@ void PWMTask(void * argument){
 //			Set_PWM(pwm);
 //			osDelay(100);
 //		}
-		Set_PWM(125);   // ensure we hit 255 exactly
+		Set_PWM(62);   // ensure we hit 255 exactly
 		osDelay(1000);
 
 //		for (int16_t pwm = 255; pwm >= 0; pwm -= 5)
@@ -806,7 +815,7 @@ void RelayTask(void *argument){
 
 void ServoTask(void *argument)
   {
-    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
+    // PWM already started in main(), don't start again
     Servo_SetPulse(SERVO_PULSE_MID_US);   // center    (1500 µs)
     osDelay(2000);
     Setpin(GPIOB,pinB[0]); //RST
@@ -817,6 +826,8 @@ void ServoTask(void *argument)
     osDelay(1000);
     Setpin(GPIOB,pinB[1]); // RUN
     osDelay(1000);
+
+
 
 
       for (;;){
@@ -906,6 +917,7 @@ void UartTask(void *argument)
 {
     char msg[160];
     UartPacket_t pkt;
+    uint8_t txData[160];
 
     for (;;)
     {
@@ -913,7 +925,7 @@ void UartTask(void *argument)
         {
             if (pkt.ina_ok)
             {
-                snprintf(msg, sizeof(msg),
+                snprintf((char*)txData, sizeof(txData),
                          "T=%7.4f Nm | I=%7.4f A | V=%6.3f V | hx_net=%ld | count_per_NM=%6.3f\r\n",
                          pkt.torque,
                          pkt.current_A,
@@ -923,12 +935,14 @@ void UartTask(void *argument)
             }
             else
             {
-                snprintf(msg, sizeof(msg),
+                snprintf((char*)txData, sizeof(txData),
                          "T=%7.4f Nm | INA219 READ ERROR\r\n",
                          pkt.torque);
             }
 
-            HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
+            if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TXE) != RESET) {
+                HAL_UART_Transmit(&huart2, txData, strlen((char*)txData), 10);
+            }
         }
     }
 }
