@@ -85,7 +85,7 @@ const osMutexAttr_t uartMutex_attributes = { .name = "uartMutex" };
 #define SENSITIVITY_MV_PER_V    2.0f
 #define EXCITATION_V            5.0f
 #define FULL_SCALE_NM           10.0f
-#define HX711_GAIN              512.0f
+#define HX711_GAIN              350.0f
 #define HX711_VREF_MV           (EXCITATION_V * 1000.0f)
 #define HX711_COUNTS            8388608.0f
 #define TORQUE_DEADBAND_NM      0.05f
@@ -198,7 +198,6 @@ void HX711_WaitReady(void)
     uint32_t timeout = 1000;
     while (HAL_GPIO_ReadPin(HX711_DOUT_PORT, HX711_DOUT_PIN) == GPIO_PIN_SET)
     {
-        HAL_Delay(1);
         if (--timeout == 0) return;
     }
 }
@@ -776,7 +775,7 @@ void PWMTask(void * argument){
 //			Set_PWM(pwm);
 //			osDelay(100);
 //		}
-		Set_PWM(62);   // ensure we hit 255 exactly
+		Set_PWM(31);   // ensure we hit 255 exactly
 		osDelay(1000);
 
 //		for (int16_t pwm = 255; pwm >= 0; pwm -= 5)
