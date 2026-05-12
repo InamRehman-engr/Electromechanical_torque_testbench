@@ -11,7 +11,7 @@ The system is designed to measure:
 
 It is intended for electromechanical test bench applications where a servo motor is tested under load and its electrical and mechanical behavior are analyzed together.
 
-![Test Bench](image/electromechanical_test_bench1.jpeg)
+![Test Bench front](image/electromechanical_test_bench1.jpeg)
 ---
 
 ## Project Overview
@@ -100,6 +100,9 @@ Typical I2C address used:
 
 ---
 
+![Test Bench side](image/electromechanical_test_bench2.jpeg)
+
+
 ## System Working Principle
 
 1. The **servo motor under test** operates in the mechanical setup.
@@ -178,6 +181,8 @@ The system can provide:
 - **Torque vs current data pair**
 
 ---
+![Putty](image/putty.png)
+
 
 ## Torque vs Current Relation
 
@@ -221,6 +226,8 @@ These graphs are useful for:
 - identifying abnormal behavior or saturation
 
 ---
+![Simulation](image/simulation.png)
+
 
 ## Repository Contents
 
