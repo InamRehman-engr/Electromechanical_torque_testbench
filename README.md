@@ -11,6 +11,7 @@ The system is designed to measure:
 
 It is intended for electromechanical test bench applications where a servo motor is tested under load and its electrical and mechanical behavior are analyzed together.
 
+![Test Bench](image/electromechanical_test_bench1.jpeg)
 ---
 
 ## Project Overview
